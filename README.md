@@ -1,36 +1,111 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PM Job Search Pipeline
 
-## Getting Started
+Automated daily job search for **Product Manager** roles in **Bengaluru** or **remote**, with Apify scraping, Claude scoring, and Notion tracking.
 
-First, run the development server:
+## Stack
+
+- **Next.js** dashboard (`Run Now`, today's matches, run logs)
+- **Apify** — LinkedIn + Naukri actors
+- **Claude** (`claude-haiku-4-5-20251001`) — 0–100 score on 4 × 25 criteria
+- **Notion** — shortlisted jobs database
+- **cron** — daily 8:00 AM IST
+
+## Setup
+
+### 1. Environment
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.local.example .env.local
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Fill in:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Variable | Description |
+|----------|-------------|
+| `APIFY_API_KEY` | Apify API token |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `NOTION_API_KEY` | Notion integration secret |
+| `NOTION_DATABASE_ID` | Target database ID |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 2. Notion database
 
-## Learn More
+Create a database with these **exact** property names:
 
-To learn more about Next.js, take a look at the following resources:
+| Property | Type |
+|----------|------|
+| Role Title | Title |
+| Company | Text |
+| Score | Number |
+| Match reason | Text |
+| JD Link | URL |
+| Date Found | Date |
+| Status | Select (add option **To Apply**) |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Connect your Notion integration to the database (⋯ → Connections).
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### 3. Apify actors
 
-## Deploy on Vercel
+Defaults (configurable via env):
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- **LinkedIn**: `mukeshrana90/linkedin-jobs-scraper-unlimited` — keyword, Bengaluru + remote, `past24Hours`
+- **Naukri**: `automation-lab/naukri-scraper` — keyword, Bangalore + remote, sorted by date, client-side 24h filter
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Subscribe to both actors on [Apify Store](https://apify.com/store) before running.
+
+### 4. Run the app
+
+```bash
+npm install
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) and click **Run Now**.
+
+Or run the pipeline from the CLI (used by cron):
+
+```bash
+npm run pipeline
+```
+
+## Daily schedule (8:00 AM IST)
+
+```bash
+chmod +x scripts/install-cron.sh
+./scripts/install-cron.sh
+```
+
+This adds: `30 2 * * *` UTC = **8:00 AM IST**.
+
+Logs: `data/cron.log`
+
+**Note:** Cron runs `npm run pipeline` directly (no server required). Keep the machine awake or use a hosted cron that calls `POST /api/pipeline/run` with `CRON_SECRET` if the app is deployed.
+
+## Pipeline flow
+
+1. Scrape LinkedIn (Bengaluru + remote, last 24h) and Naukri (Bangalore + remote, last 24h)
+2. Deduplicate by job URL
+3. **Hard filters** (auto-reject JD containing): `quota`, `pipeline`, `sales target`, `unpaid`, `intern`, `night shift`, `rotational shift`, or Associate PM + 5+ years
+4. **Claude score** (0–100, threshold **60**)
+5. Push passing jobs to Notion (skip duplicates by JD Link)
+
+## Deployed cron (optional)
+
+If the app runs on a server:
+
+```bash
+curl -X POST https://your-app.com/api/pipeline/run \
+  -H "Authorization: Bearer $CRON_SECRET"
+```
+
+## Project layout
+
+```
+src/lib/
+  apify.ts      # LinkedIn + Naukri scrapers
+  filters.ts    # Hard filters
+  scorer.ts     # Claude scoring
+  notion.ts     # Notion sync
+  pipeline.ts   # Orchestration
+data/
+  pipeline-state.json   # Run history (gitignored)
+```
