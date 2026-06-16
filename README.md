@@ -47,8 +47,10 @@ Connect your Notion integration to the database (⋯ → Connections).
 
 Defaults (configurable via env):
 
-- **LinkedIn**: `mukeshrana90/linkedin-jobs-scraper-unlimited` — keyword, Bengaluru + remote, `past24Hours`
-- **Naukri**: `automation-lab/naukri-scraper` — keyword, Bangalore + remote, sorted by date, client-side 24h filter
+- **LinkedIn**: `curious_coder/linkedin-jobs-scraper` — pass search URLs with `f_TPR=r86400` (last 24h), Bengaluru + remote
+- **Naukri**: `memo23/naukri-scraper` — keyword + location, `timeFilter: 24h`
+
+> **Note:** `apimaestro/linkedin-jobs-scraper` and `curious_coder/naukri-scraper` do not exist on Apify (verified via API). The actors above are the working replacements.
 
 Subscribe to both actors on [Apify Store](https://apify.com/store) before running.
 
@@ -60,6 +62,8 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) and click **Run Now**.
+
+**Test mode:** Check "Test mode" on the dashboard (or `npm run pipeline -- --test`) to skip Apify and run 5 mock jobs through Claude scoring and Notion sync.
 
 Or run the pipeline from the CLI (used by cron):
 

@@ -1,7 +1,20 @@
-import { APIFY_LINKEDIN_ACTOR, APIFY_NAUKRI_ACTOR, SEARCH_KEYWORD } from "./config";
-import type { JobListing, JobSource } from "./types";
-
-const APIFY_TIMEOUT_SEC = 600;
+import {
+  APIFY_LINKEDIN_ACTOR,
+  APIFY_NAUKRI_ACTOR,
+  APIFY_RESPONSE_PREVIEW_MAX,
+  LINKEDIN_SEARCH_URLS,
+  SEARCH_KEYWORD,
+} from "./config";
+import {
+  APIFY_WAIT_FOR_FINISH_SEC,
+  APIFY_ZERO_JOBS_ERROR,
+} from "./apify-constants";
+import type {
+  ApifyScrapeLog,
+  JobListing,
+  JobSource,
+  ScrapeAllResult,
+} from "./types";
 
 function getApifyToken(): string {
   const token = process.env.APIFY_API_KEY;
@@ -11,33 +24,202 @@ function getApifyToken(): string {
   return token;
 }
 
-async function runActorDataset(
+function previewBody(body: string): string {
+  if (body.length <= APIFY_RESPONSE_PREVIEW_MAX) return body;
+  return `${body.slice(0, APIFY_RESPONSE_PREVIEW_MAX)}… [truncated ${body.length - APIFY_RESPONSE_PREVIEW_MAX} chars]`;
+}
+
+function logApify(label: string, log: ApifyScrapeLog): void {
+  const prefix = `[apify:${log.source}:${label}]`;
+  if (log.success) {
+    console.log(
+      `${prefix} run=${log.runId ?? "?"} status=${log.runStatus ?? "?"} items=${log.rawItemCount} normalized=${log.normalizedCount} (${log.durationMs}ms)`,
+    );
+  } else {
+    console.error(
+      `${prefix} FAILED run=${log.runId ?? "?"} — ${log.error ?? "unknown error"}`,
+    );
+    if (log.responseBodyPreview) {
+      console.error(`${prefix} response:`, log.responseBodyPreview);
+    }
+  }
+}
+
+interface ApifyRunResponse {
+  data?: {
+    id?: string;
+    status?: string;
+    defaultDatasetId?: string;
+    statusMessage?: string;
+  };
+}
+
+interface ActorRunOutcome {
+  items: Record<string, unknown>[];
+  log: ApifyScrapeLog;
+}
+
+function createBaseLog(
+  source: JobSource,
   actorId: string,
+  label: string,
   input: Record<string, unknown>,
-): Promise<Record<string, unknown>[]> {
+): ApifyScrapeLog {
+  return {
+    source,
+    actorId,
+    label,
+    input,
+    statusCode: 0,
+    success: false,
+    rawItemCount: 0,
+    normalizedCount: 0,
+    durationMs: 0,
+  };
+}
+
+/**
+ * Start an actor run, wait synchronously (waitForFinish), then fetch dataset items.
+ * POST /v2/acts/{actorId}/runs?waitForFinish=120
+ * GET  /v2/actor-runs/{runId}/dataset/items
+ */
+async function runActorAndFetchDataset(
+  source: JobSource,
+  actorId: string,
+  label: string,
+  input: Record<string, unknown>,
+): Promise<ActorRunOutcome> {
+  const started = Date.now();
   const token = getApifyToken();
-  const url = new URL(
-    `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items`,
-  );
-  url.searchParams.set("token", token);
-  url.searchParams.set("timeout", String(APIFY_TIMEOUT_SEC));
+  const baseLog = createBaseLog(source, actorId, label, input);
 
-  const response = await fetch(url.toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  try {
+    const runUrl = new URL(`https://api.apify.com/v2/acts/${actorId}/runs`);
+    runUrl.searchParams.set("token", token);
+    runUrl.searchParams.set("waitForFinish", String(APIFY_WAIT_FOR_FINISH_SEC));
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Apify actor ${actorId} failed (${response.status}): ${body}`);
+    console.log(
+      `[apify:${source}:${label}] Starting run (waitForFinish=${APIFY_WAIT_FOR_FINISH_SEC}s)…`,
+    );
+
+    const runResponse = await fetch(runUrl.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+
+    const runBodyText = await runResponse.text();
+    baseLog.statusCode = runResponse.status;
+    baseLog.responseBodyPreview = previewBody(runBodyText);
+
+    if (!runResponse.ok) {
+      baseLog.durationMs = Date.now() - started;
+      baseLog.error = `Run request failed HTTP ${runResponse.status}: ${runBodyText.slice(0, 500)}`;
+      logApify(label, baseLog);
+      return { items: [], log: baseLog };
+    }
+
+    let runPayload: ApifyRunResponse;
+    try {
+      runPayload = JSON.parse(runBodyText) as ApifyRunResponse;
+    } catch {
+      baseLog.durationMs = Date.now() - started;
+      baseLog.error = `Run response is not valid JSON: ${runBodyText.slice(0, 300)}`;
+      logApify(label, baseLog);
+      return { items: [], log: baseLog };
+    }
+
+    const runId = runPayload.data?.id;
+    const runStatus = runPayload.data?.status;
+    baseLog.runId = runId;
+    baseLog.runStatus = runStatus;
+
+    if (!runId) {
+      baseLog.durationMs = Date.now() - started;
+      baseLog.error = `No run ID in Apify response: ${runBodyText.slice(0, 300)}`;
+      logApify(label, baseLog);
+      return { items: [], log: baseLog };
+    }
+
+    if (runStatus === "TIMED-OUT") {
+      baseLog.durationMs = Date.now() - started;
+      baseLog.error = `Apify actor run timed out after ${APIFY_WAIT_FOR_FINISH_SEC} seconds (waitForFinish)`;
+      logApify(label, baseLog);
+      return { items: [], log: baseLog };
+    }
+
+    if (runStatus === "FAILED" || runStatus === "ABORTED") {
+      baseLog.durationMs = Date.now() - started;
+      const statusMsg = runPayload.data?.statusMessage;
+      baseLog.error = statusMsg
+        ? `Apify actor run ${runStatus}: ${statusMsg}`
+        : `Apify actor run ${runStatus}`;
+      logApify(label, baseLog);
+      return { items: [], log: baseLog };
+    }
+
+    if (runStatus !== "SUCCEEDED" && runStatus !== "READY") {
+      baseLog.durationMs = Date.now() - started;
+      baseLog.error = `Apify actor run ended with unexpected status: ${runStatus}`;
+      logApify(label, baseLog);
+      return { items: [], log: baseLog };
+    }
+
+    console.log(
+      `[apify:${source}:${label}] Run ${runId} finished (${runStatus}), fetching dataset…`,
+    );
+
+    const itemsUrl = new URL(
+      `https://api.apify.com/v2/actor-runs/${runId}/dataset/items`,
+    );
+    itemsUrl.searchParams.set("token", token);
+
+    const itemsResponse = await fetch(itemsUrl.toString());
+    const itemsBodyText = await itemsResponse.text();
+
+    if (!itemsResponse.ok) {
+      baseLog.durationMs = Date.now() - started;
+      baseLog.error = `Dataset fetch failed HTTP ${itemsResponse.status}: ${itemsBodyText.slice(0, 500)}`;
+      baseLog.responseBodyPreview = previewBody(itemsBodyText);
+      logApify(label, baseLog);
+      return { items: [], log: baseLog };
+    }
+
+    let items: Record<string, unknown>[];
+    try {
+      const parsed = JSON.parse(itemsBodyText) as unknown;
+      if (!Array.isArray(parsed)) {
+        baseLog.durationMs = Date.now() - started;
+        baseLog.error = `Dataset response is not an array: ${itemsBodyText.slice(0, 300)}`;
+        logApify(label, baseLog);
+        return { items: [], log: baseLog };
+      }
+      items = parsed as Record<string, unknown>[];
+    } catch {
+      baseLog.durationMs = Date.now() - started;
+      baseLog.error = `Dataset response is not valid JSON: ${itemsBodyText.slice(0, 300)}`;
+      logApify(label, baseLog);
+      return { items: [], log: baseLog };
+    }
+
+    baseLog.rawItemCount = items.length;
+    baseLog.durationMs = Date.now() - started;
+
+    if (items.length === 0) {
+      baseLog.error = APIFY_ZERO_JOBS_ERROR;
+      logApify(label, baseLog);
+      return { items: [], log: baseLog };
+    }
+
+    baseLog.success = true;
+    logApify(label, baseLog);
+    return { items, log: baseLog };
+  } catch (error) {
+    baseLog.durationMs = Date.now() - started;
+    baseLog.error = error instanceof Error ? error.message : String(error);
+    logApify(label, baseLog);
+    return { items: [], log: baseLog };
   }
-
-  const data = (await response.json()) as unknown;
-  if (!Array.isArray(data)) {
-    return [];
-  }
-  return data as Record<string, unknown>[];
 }
 
 function pickString(record: Record<string, unknown>, keys: string[]): string {
@@ -50,16 +232,49 @@ function pickString(record: Record<string, unknown>, keys: string[]): string {
   return "";
 }
 
-function normalizeLinkedInItem(
-  item: Record<string, unknown>,
-): JobListing | null {
-  const title = pickString(item, ["title", "jobTitle", "position"]);
-  const company = pickString(item, [
+function pickCompanyName(record: Record<string, unknown>): string {
+  const direct = pickString(record, [
     "companyName",
     "company",
     "company_name",
     "employer",
+    "staticCompanyName",
   ]);
+  if (direct) return direct;
+
+  const detail = record.companyDetail;
+  if (detail && typeof detail === "object" && "name" in detail) {
+    const name = (detail as { name?: unknown }).name;
+    if (typeof name === "string" && name.trim()) return name.trim();
+  }
+  return "";
+}
+
+function pickLocation(record: Record<string, unknown>): string {
+  const direct = pickString(record, ["location", "jobLocation", "place"]);
+  if (direct) return direct;
+
+  const locations = record.locations;
+  if (Array.isArray(locations) && locations.length > 0) {
+    const labels = locations
+      .map((loc) => {
+        if (loc && typeof loc === "object" && "label" in loc) {
+          const label = (loc as { label?: unknown }).label;
+          return typeof label === "string" ? label : "";
+        }
+        return "";
+      })
+      .filter(Boolean);
+    if (labels.length > 0) return labels.join(", ");
+  }
+  return "";
+}
+
+function normalizeLinkedInItem(
+  item: Record<string, unknown>,
+): JobListing | null {
+  const title = pickString(item, ["title", "jobTitle", "position"]);
+  const company = pickCompanyName(item);
   const url = pickString(item, [
     "link",
     "jobUrl",
@@ -74,7 +289,7 @@ function normalizeLinkedInItem(
     pickString(item, ["descriptionHtml"]) ||
     "";
 
-  const location = pickString(item, ["location", "jobLocation", "place"]);
+  const location = pickLocation(item);
   const postedAt =
     pickString(item, ["postedAt", "postedDate", "datePosted"]) || undefined;
 
@@ -94,12 +309,9 @@ function normalizeLinkedInItem(
 
 function normalizeNaukriItem(item: Record<string, unknown>): JobListing | null {
   const title = pickString(item, ["title", "jobTitle", "job_title"]);
-  const company = pickString(item, [
-    "companyName",
-    "company",
-    "company_name",
-  ]);
+  const company = pickCompanyName(item);
   const url = pickString(item, [
+    "staticUrl",
     "jobUrl",
     "url",
     "applyUrl",
@@ -109,14 +321,19 @@ function normalizeNaukriItem(item: Record<string, unknown>): JobListing | null {
   if (!title || !url) return null;
 
   const description =
-    pickString(item, ["description", "jobDescription", "job_description"]) ||
-    "";
+    pickString(item, [
+      "description",
+      "shortDescription",
+      "jobDescription",
+      "job_description",
+    ]) || "";
 
-  const location = pickString(item, ["location", "jobLocation", "place"]);
+  const location = pickLocation(item);
   const postedAt =
-    pickString(item, ["postedDate", "postedAt", "posted_date"]) || undefined;
+    pickString(item, ["createdDate", "postedDate", "postedAt", "posted_date"]) ||
+    undefined;
 
-  const id = pickString(item, ["id", "jobId"]) || `${url}-${title}`;
+  const id = pickString(item, ["jobId", "id"]) || `${url}-${title}`;
 
   return {
     id: `naukri-${id}`,
@@ -141,82 +358,104 @@ function normalizeItems(
     .filter((job): job is JobListing => job !== null);
 }
 
-export async function scrapeLinkedInJobs(): Promise<JobListing[]> {
-  const runs: JobListing[] = [];
-
-  const bengaluruInput = {
-    keywords: SEARCH_KEYWORD,
-    location: "Bengaluru, Karnataka, India",
-    datePosted: "past24Hours",
-    maxResults: 100,
-    scrapeJobDetails: true,
-    workType: [] as string[],
-  };
-
-  const remoteInput = {
-    keywords: SEARCH_KEYWORD,
-    location: "India",
-    datePosted: "past24Hours",
-    maxResults: 100,
-    scrapeJobDetails: true,
-    workType: ["remote"],
-  };
-
-  const [bengaluruItems, remoteItems] = await Promise.all([
-    runActorDataset(APIFY_LINKEDIN_ACTOR, bengaluruInput),
-    runActorDataset(APIFY_LINKEDIN_ACTOR, remoteInput),
-  ]);
-
-  runs.push(...normalizeItems(bengaluruItems, "linkedin"));
-  runs.push(...normalizeItems(remoteItems, "linkedin"));
-
-  return runs;
+function attachNormalizedCount(
+  log: ApifyScrapeLog,
+  jobs: JobListing[],
+): ApifyScrapeLog {
+  return { ...log, normalizedCount: jobs.length };
 }
 
-/** LinkedIn Jobs Scraper (curious_coder) — pass pre-built search URLs with f_TPR=r86400. */
-export async function scrapeLinkedInViaUrls(urls: string[]): Promise<JobListing[]> {
-  const actorId =
-    process.env.APIFY_LINKEDIN_URL_ACTOR_ID ?? "curious_coder~linkedin-jobs-scraper";
-  const items = await runActorDataset(actorId, {
-    urls,
+function zeroJobsError(label: string): string {
+  return `${label}: ${APIFY_ZERO_JOBS_ERROR}`;
+}
+
+export async function scrapeLinkedInJobs(): Promise<{
+  jobs: JobListing[];
+  logs: ApifyScrapeLog[];
+  errors: string[];
+}> {
+  const input = {
+    urls: LINKEDIN_SEARCH_URLS,
     scrapeCompany: false,
     count: 100,
-  });
-  return normalizeItems(items, "linkedin");
-}
-
-export async function scrapeNaukriJobs(): Promise<JobListing[]> {
-  const baseInput = {
-    keyword: SEARCH_KEYWORD,
-    maxJobs: 100,
-    sortBy: "date",
-    experienceMin: 0,
-    workMode: "any",
   };
 
-  const [bangaloreItems, remoteItems] = await Promise.all([
-    runActorDataset(APIFY_NAUKRI_ACTOR, {
-      ...baseInput,
-      location: "bangalore",
-    }),
-    runActorDataset(APIFY_NAUKRI_ACTOR, {
-      ...baseInput,
-      location: "remote",
-      workMode: "remote",
-    }),
-  ]);
+  const { items, log } = await runActorAndFetchDataset(
+    "linkedin",
+    APIFY_LINKEDIN_ACTOR,
+    "Bengaluru + Remote (last 24h)",
+    input,
+  );
 
-  const jobs = [
-    ...normalizeItems(bangaloreItems, "naukri"),
-    ...normalizeItems(remoteItems, "naukri"),
+  const jobs = normalizeItems(items, "linkedin");
+  const finalLog = attachNormalizedCount(log, jobs);
+  logApify("Bengaluru + Remote (last 24h)", finalLog);
+
+  const errors: string[] = [];
+  if (!log.success) {
+    errors.push(log.error ?? `LinkedIn scrape failed (HTTP ${log.statusCode})`);
+  } else if (jobs.length === 0 && items.length > 0) {
+    errors.push(
+      `LinkedIn: ${items.length} Apify items but none normalized (check title/url fields)`,
+    );
+  }
+
+  return { jobs, logs: [finalLog], errors };
+}
+
+export async function scrapeNaukriJobs(): Promise<{
+  jobs: JobListing[];
+  logs: ApifyScrapeLog[];
+  errors: string[];
+}> {
+  const baseInput = {
+    platform: "naukri",
+    searchQuery: SEARCH_KEYWORD,
+    maximumJobs: 100,
+    timeFilter: "24h",
+    includeDescription: true,
+    cleanHtml: true,
+    startUrls: [] as string[],
+  };
+
+  const runs = [
+    {
+      label: "Bangalore (last 24h)",
+      input: { ...baseInput, location: "bangalore" },
+    },
+    {
+      label: "Remote (last 24h)",
+      input: { ...baseInput, location: "bangalore", workMode: "1" },
+    },
   ];
 
-  return jobs.filter((job) => {
-    if (!job.postedAt) return true;
-    const posted = new Date(job.postedAt);
-    if (Number.isNaN(posted.getTime())) return true;
-    return Date.now() - posted.getTime() <= 24 * 60 * 60 * 1000;
-  });
+  const logs: ApifyScrapeLog[] = [];
+  const errors: string[] = [];
+  const jobs: JobListing[] = [];
+
+  for (const run of runs) {
+    const { items, log } = await runActorAndFetchDataset(
+      "naukri",
+      APIFY_NAUKRI_ACTOR,
+      run.label,
+      run.input,
+    );
+    const normalized = normalizeItems(items, "naukri");
+    const finalLog = attachNormalizedCount(log, normalized);
+    logs.push(finalLog);
+
+    if (!log.success) {
+      errors.push(log.error ?? zeroJobsError(run.label));
+    } else if (normalized.length === 0 && items.length > 0) {
+      errors.push(
+        `Naukri ${run.label}: ${items.length} Apify items but none normalized`,
+      );
+    }
+
+    jobs.push(...normalized);
+  }
+
+  return { jobs, logs, errors };
 }
 
 export function dedupeJobs(jobs: JobListing[]): JobListing[] {
@@ -233,10 +472,28 @@ export function dedupeJobs(jobs: JobListing[]): JobListing[] {
   return result;
 }
 
-export async function scrapeAllSources(): Promise<JobListing[]> {
-  const [linkedin, naukri] = await Promise.all([
-    scrapeLinkedInJobs(),
-    scrapeNaukriJobs(),
-  ]);
-  return dedupeJobs([...linkedin, ...naukri]);
+export async function scrapeAllSources(): Promise<ScrapeAllResult> {
+  const linkedin = await scrapeLinkedInJobs();
+  const naukri = await scrapeNaukriJobs();
+
+  const logs = [...linkedin.logs, ...naukri.logs];
+  const errors = [...linkedin.errors, ...naukri.errors];
+  const jobs = dedupeJobs([...linkedin.jobs, ...naukri.jobs]);
+
+  const itemSummary = logs
+    .map((l) => `${l.source}/${l.label}: ${l.rawItemCount} items`)
+    .join(", ");
+
+  console.log(
+    `[pipeline:scrape] Apify items — ${itemSummary} | total normalized=${jobs.length}`,
+  );
+
+  if (jobs.length === 0) {
+    const allZeroItems = logs.every((l) => l.rawItemCount === 0);
+    if (allZeroItems && errors.length === 0) {
+      errors.push(APIFY_ZERO_JOBS_ERROR);
+    }
+  }
+
+  return { jobs, logs, errors };
 }
