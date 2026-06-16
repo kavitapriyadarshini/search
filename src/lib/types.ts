@@ -61,6 +61,7 @@ export interface PipelineRunLog {
   scored: number;
   shortlisted: number;
   notionAdded: number;
+  warnings?: string[];
   error?: string;
   failedStep?: PipelineStep;
   stepError?: PipelineStepError;

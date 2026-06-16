@@ -1,4 +1,12 @@
-export function isAuthorizedCronRequest(request: Request): boolean {
+/** Vercel Cron sends GET with Authorization: Bearer <CRON_SECRET>. */
+export function isAuthorizedVercelCron(request: Request): boolean {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return false;
+  return request.headers.get("authorization") === `Bearer ${secret}`;
+}
+
+/** Optional protection for manual POST runs from the dashboard. */
+export function isAuthorizedManualRun(request: Request): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return true;
 

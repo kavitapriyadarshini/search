@@ -20,6 +20,7 @@ import type {
 
 export interface RunPipelineOptions {
   testMode?: boolean;
+  mockJobs?: JobListing[];
 }
 
 function newRunId(): string {
@@ -59,7 +60,7 @@ export async function runPipeline(
 
     if (run.testMode) {
       console.log("[pipeline:scrape] Test mode — using 5 mock job listings");
-      allJobs = getMockJobs();
+      allJobs = options.mockJobs ?? getMockJobs();
       run.scrapeLogs = [];
     } else {
       const scrapeResult = await scrapeAllSources();
@@ -133,8 +134,14 @@ export async function runPipeline(
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Notion sync failed";
-      await finishRun(failRun(run, "notion", message));
-      return run;
+      if (run.testMode) {
+        run.notionAdded = 0;
+        run.warnings = [...(run.warnings ?? []), `Notion skipped in test mode: ${message}`];
+        console.warn(`[pipeline:notion] Test mode skip — ${message}`);
+      } else {
+        await finishRun(failRun(run, "notion", message));
+        return run;
+      }
     }
 
     run.status = "success";

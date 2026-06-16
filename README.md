@@ -26,6 +26,7 @@ Fill in:
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 | `NOTION_API_KEY` | Notion integration secret |
 | `NOTION_DATABASE_ID` | Target database ID |
+| `CRON_SECRET` | Random secret for Vercel Cron (required in production) |
 
 ### 2. Notion database
 
@@ -65,24 +66,29 @@ Open [http://localhost:3000](http://localhost:3000) and click **Run Now**.
 
 **Test mode:** Check "Test mode" on the dashboard (or `npm run pipeline -- --test`) to skip Apify and run 5 mock jobs through Claude scoring and Notion sync.
 
-Or run the pipeline from the CLI (used by cron):
+Or run the pipeline from the CLI:
 
 ```bash
 npm run pipeline
+npm run pipeline -- --test   # mock jobs, no Apify
 ```
 
-## Daily schedule (8:00 AM IST)
+## Deploy to Vercel (daily 8:00 AM IST)
 
-```bash
-chmod +x scripts/install-cron.sh
-./scripts/install-cron.sh
-```
+The app uses **Vercel Cron Jobs** — no laptop or local dev server required.
 
-This adds: `30 2 * * *` UTC = **8:00 AM IST**.
+1. Push to GitHub and [deploy on Vercel](https://vercel.com/new)
+2. Add all env vars from `.env.local` in **Project → Settings → Environment Variables**, including:
+   - `CRON_SECRET` — generate with `openssl rand -base64 32`
+3. Vercel reads `vercel.json` and runs `GET /api/pipeline/run` at **02:30 UTC** (= 8:00 AM IST)
 
-Logs: `data/cron.log`
+Vercel automatically sends `Authorization: Bearer <CRON_SECRET>` on cron invocations. The GET handler rejects requests without a valid secret.
 
-**Note:** Cron runs `npm run pipeline` directly (no server required). Keep the machine awake or use a hosted cron that calls `POST /api/pipeline/run` with `CRON_SECRET` if the app is deployed.
+> **Hobby plan:** Cron jobs require Vercel Pro on some accounts. Check [Vercel Cron docs](https://vercel.com/docs/cron-jobs) for your plan limits.
+
+### Local cron (optional, deprecated)
+
+`scripts/install-cron.sh` still works if you want to run `npm run pipeline` on your machine, but **Vercel Cron is the recommended approach** for 24/7 scheduling.
 
 ## Pipeline flow
 
@@ -91,15 +97,6 @@ Logs: `data/cron.log`
 3. **Hard filters** (auto-reject JD containing): `quota`, `pipeline`, `sales target`, `unpaid`, `intern`, `night shift`, `rotational shift`, or Associate PM + 5+ years
 4. **Claude score** (0–100, threshold **60**)
 5. Push passing jobs to Notion (skip duplicates by JD Link)
-
-## Deployed cron (optional)
-
-If the app runs on a server:
-
-```bash
-curl -X POST https://your-app.com/api/pipeline/run \
-  -H "Authorization: Bearer $CRON_SECRET"
-```
 
 ## Project layout
 

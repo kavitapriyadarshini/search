@@ -24,8 +24,10 @@ export default function Dashboard() {
   const [runMessage, setRunMessage] = useState<string | null>(null);
   const [testMode, setTestMode] = useState(false);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  const refresh = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) {
+      setLoading(true);
+    }
     try {
       const [jobsRes, logsRes] = await Promise.all([
         fetch("/api/jobs/today"),
@@ -49,28 +51,37 @@ export default function Dashboard() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
-      setLoading(false);
+      if (!opts?.silent) {
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     void refresh();
-    const interval = setInterval(() => {
-      void refresh();
-    }, 15000);
-    return () => clearInterval(interval);
   }, [refresh]);
+
+  useEffect(() => {
+    if (!running) return;
+    const interval = setInterval(() => {
+      void refresh({ silent: true });
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [refresh, running]);
 
   async function handleRunNow() {
     setRunning(true);
     setRunMessage(null);
     setError(null);
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 35000);
     try {
       const res = await fetch("/api/pipeline/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ test: testMode }),
+        signal: controller.signal,
       });
       const data = (await res.json()) as {
         ok?: boolean;
@@ -100,14 +111,20 @@ export default function Dashboard() {
 
       setRunMessage(
         testMode
-          ? `Test run complete — ${data.run?.shortlisted ?? 0} shortlisted, ${data.run?.notionAdded ?? 0} added to Notion (mock data, no Apify)`
+          ? `Test run complete — ${data.run?.shortlisted ?? 0} shortlisted${data.run?.warnings?.length ? ` (${data.run.warnings[0]})` : ""}`
           : `Done — ${data.run?.shortlisted ?? 0} shortlisted, ${data.run?.notionAdded ?? 0} added to Notion`,
       );
       await refresh();
       setRunning(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Run failed");
+      if (err instanceof Error && err.name === "AbortError") {
+        setError("Pipeline request timed out after 35 seconds. Please retry.");
+      } else {
+        setError(err instanceof Error ? err.message : "Run failed");
+      }
       setRunning(false);
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
