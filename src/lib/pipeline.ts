@@ -136,13 +136,13 @@ export async function runPipeline(
       `${afterHardFilter.length} passed, ${hardFiltered} filtered`,
     );
 
-    const jobsForScoring = selectJobsForScoring(afterHardFilter, 5);
+    const jobsForScoring = selectJobsForScoring(afterHardFilter, 3);
     run.prefilterSelected = jobsForScoring.length;
     recordStep(
       progress,
       "hard_filter",
       "Keyword pre-filter for scoring",
-      `${jobsForScoring.length} of ${afterHardFilter.length} selected (max 5)`,
+      `${jobsForScoring.length} of ${afterHardFilter.length} selected (max 3)`,
     );
 
     step = "score";

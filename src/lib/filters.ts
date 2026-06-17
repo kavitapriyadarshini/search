@@ -50,10 +50,10 @@ export function isWithinLast24Hours(postedAt?: string): boolean {
 const PM_TITLE_PATTERN = /product manager|\bPM\b/i;
 const DOMAIN_PATTERN = /fintech|payments|\bAI\b|SaaS/i;
 
-/** Keyword pre-filter before LLM scoring — max 5 jobs to reduce API load. */
+/** Keyword pre-filter before LLM scoring — max 3 jobs to fit Vercel time limit. */
 export function selectJobsForScoring(
   jobs: JobListing[],
-  limit = 5,
+  limit = 3,
 ): JobListing[] {
   const matched = jobs.filter((job) => {
     const text = `${job.title}\n${job.description}`;

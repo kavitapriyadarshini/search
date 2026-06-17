@@ -80,7 +80,7 @@ function createBaseLog(
 
 /**
  * Start an actor run, wait synchronously (waitForFinish), then fetch dataset items.
- * POST /v2/acts/{actorId}/runs?waitForFinish=120
+ * POST /v2/acts/{actorId}/runs?waitForFinish=60
  * GET  /v2/actor-runs/{runId}/dataset/items
  */
 async function runActorAndFetchDataset(
@@ -474,6 +474,29 @@ export function dedupeJobs(jobs: JobListing[]): JobListing[] {
 
 export async function scrapeAllSources(): Promise<ScrapeAllResult> {
   const linkedin = await scrapeLinkedInJobs();
+
+  if (process.env.VERCEL) {
+    console.log("[pipeline:scrape] Vercel: skipping Naukri scraper (LinkedIn only)");
+    const { logs, errors, jobs } = linkedin;
+
+    const itemSummary = logs
+      .map((l) => `${l.source}/${l.label}: ${l.rawItemCount} items`)
+      .join(", ");
+
+    console.log(
+      `[pipeline:scrape] Apify items — ${itemSummary} | total normalized=${jobs.length}`,
+    );
+
+    if (jobs.length === 0) {
+      const allZeroItems = logs.every((l) => l.rawItemCount === 0);
+      if (allZeroItems && errors.length === 0) {
+        errors.push(APIFY_ZERO_JOBS_ERROR);
+      }
+    }
+
+    return { jobs, logs, errors };
+  }
+
   const naukri = await scrapeNaukriJobs();
 
   const logs = [...linkedin.logs, ...naukri.logs];

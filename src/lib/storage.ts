@@ -81,7 +81,21 @@ export function getTodayShortlisted(state: PipelineState): ScoredJob[] {
   return results.sort((a, b) => b.score - a.score);
 }
 
-const STALE_RUN_MS = 60 * 60 * 1000;
+/** Most recent non-test run that finished successfully today. */
+export function getTodayCompletedRun(state: PipelineState): PipelineRunLog | null {
+  const today = new Date().toISOString().slice(0, 10);
+
+  for (const run of state.runs) {
+    if (run.testMode) continue;
+    if (run.status !== "success" && run.status !== "incomplete") continue;
+    const runDay = (run.finishedAt ?? run.startedAt).slice(0, 10);
+    if (runDay === today) return run;
+  }
+
+  return null;
+}
+
+const STALE_RUN_MS = 5 * 60 * 1000;
 
 export function isRunInProgress(state: PipelineState): boolean {
   const last = state.lastRun;

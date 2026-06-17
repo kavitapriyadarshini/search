@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { formatStepError, stepLabel } from "@/lib/format-errors";
 import type {
@@ -8,8 +8,9 @@ import type {
   PipelineRunLog,
   ScoredJob,
 } from "@/lib/types";
+import type { PipelineProgress } from "@/lib/pipeline-progress";
 
-const ACTIVE_RUN_MS = 60 * 60 * 1000;
+const ACTIVE_RUN_MS = 5 * 60 * 1000;
 
 function isActiveServerRun(run: PipelineRunLog | null): boolean {
   if (!run || run.status !== "running") return false;
@@ -18,9 +19,24 @@ function isActiveServerRun(run: PipelineRunLog | null): boolean {
   return Date.now() - started < ACTIVE_RUN_MS;
 }
 
-function formatRunCompleteMessage(run: PipelineRunLog, testMode: boolean): string {
+function formatProgress(progress?: PipelineProgress): string {
+  if (!progress?.steps.length) return "";
+  return progress.steps.map((s) => s.label).join(" → ");
+}
+
+function formatRunCompleteMessage(
+  run: PipelineRunLog,
+  testMode: boolean,
+  opts?: { cached?: boolean; progress?: PipelineProgress },
+): string {
+  if (opts?.cached) {
+    return `Using cached results from today — ${run.shortlisted} shortlisted, ${run.notionAdded} in Notion`;
+  }
   if (run.status === "incomplete") {
-    return `Incomplete run — ${run.shortlisted} shortlisted`;
+    const progressMsg = formatProgress(opts?.progress);
+    return progressMsg
+      ? `Incomplete run — ${run.shortlisted} shortlisted (${progressMsg})`
+      : `Incomplete run — ${run.shortlisted} shortlisted`;
   }
   if (testMode) {
     return `Test run complete — ${run.shortlisted} shortlisted${run.warnings?.length ? ` (${run.warnings[0]})` : ""}`;
@@ -46,12 +62,6 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [runMessage, setRunMessage] = useState<string | null>(null);
   const [testMode, setTestMode] = useState(false);
-  const pollForCompletionRef = useRef(false);
-  const testModeRef = useRef(testMode);
-
-  useEffect(() => {
-    testModeRef.current = testMode;
-  }, [testMode]);
 
   const refresh = useCallback(async (opts?: { silent?: boolean }) => {
     if (!opts?.silent) {
@@ -76,24 +86,7 @@ export default function Dashboard() {
       setJobs(jobsData.jobs);
       setLastRun(logsData.lastRun);
       setRuns(logsData.runs);
-
-      const active = isActiveServerRun(logsData.lastRun);
-      if (
-        pollForCompletionRef.current &&
-        !active &&
-        logsData.lastRun &&
-        logsData.lastRun.status !== "running"
-      ) {
-        pollForCompletionRef.current = false;
-        const run = logsData.lastRun;
-        if (run.status === "success" || run.status === "incomplete") {
-          setRunMessage(formatRunCompleteMessage(run, testModeRef.current));
-          setError(null);
-        } else if (run.status === "failed") {
-          setError(formatStepError(run.stepError) || run.error || "Pipeline run failed");
-        }
-      }
-      setRunning(active);
+      setRunning(isActiveServerRun(logsData.lastRun));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
@@ -119,24 +112,28 @@ export default function Dashboard() {
     setRunning(true);
     setRunMessage(null);
     setError(null);
-    pollForCompletionRef.current = true;
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 260_000);
     try {
       const res = await fetch("/api/pipeline/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ test: testMode }),
+        signal: controller.signal,
       });
       const rawText = await res.text();
       let data: {
         ok?: boolean;
-        status?: string;
+        cached?: boolean;
+        incomplete?: boolean;
         error?: string;
+        progress?: PipelineProgress;
+        run?: PipelineRunLog;
       };
       try {
         data = JSON.parse(rawText) as typeof data;
       } catch {
-        pollForCompletionRef.current = false;
         setError(
           rawText.trim() || `Request failed with status ${res.status}`,
         );
@@ -144,25 +141,63 @@ export default function Dashboard() {
         return;
       }
 
+      if (data.run) {
+        setLastRun(data.run);
+        setRuns((prev) => {
+          const exists = prev.some((r) => r.id === data.run!.id);
+          return exists
+            ? prev.map((r) => (r.id === data.run!.id ? data.run! : r))
+            : [data.run!, ...prev];
+        });
+        if (data.run.matches?.length) {
+          setJobs(data.run.matches);
+        }
+      }
+
       if (!res.ok || !data.ok) {
-        pollForCompletionRef.current = false;
-        setError(data.error ?? "Failed to start pipeline");
+        const msg =
+          data.error ??
+          (data.run
+            ? formatStepError(data.run.stepError) || data.run.error
+            : undefined) ??
+          "Pipeline run failed";
+        const progressMsg = formatProgress(data.progress);
+        setError(
+          progressMsg ? `${msg} (reached: ${progressMsg})` : msg,
+        );
+        if (data.incomplete && data.run) {
+          setRunMessage(
+            formatRunCompleteMessage(data.run, testMode, {
+              progress: data.progress,
+            }),
+          );
+        }
         setRunning(false);
+        await refresh({ silent: true });
         return;
       }
 
-      if (data.status === "started") {
-        setRunMessage("Pipeline started — checking progress every 10 seconds…");
-        void refresh({ silent: true });
-        return;
+      if (data.run) {
+        setRunMessage(
+          formatRunCompleteMessage(data.run, testMode, {
+            cached: data.cached,
+            progress: data.progress,
+          }),
+        );
       }
-
-      pollForCompletionRef.current = false;
+      await refresh({ silent: true });
       setRunning(false);
     } catch (err) {
-      pollForCompletionRef.current = false;
-      setError(err instanceof Error ? err.message : "Run failed");
+      if (err instanceof Error && err.name === "AbortError") {
+        setError(
+          "Pipeline request timed out after 260 seconds. Check server logs.",
+        );
+      } else {
+        setError(err instanceof Error ? err.message : "Run failed");
+      }
       setRunning(false);
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -183,7 +218,7 @@ export default function Dashboard() {
               Today&apos;s PM Matches
             </h1>
             <p className="mt-2 max-w-xl text-slate-400">
-              LinkedIn + Naukri → hard filters → Groq scoring → Notion tracker
+              LinkedIn → hard filters → Groq scoring (3 jobs) → Notion tracker
             </p>
           </div>
           <div className="flex flex-col items-stretch gap-3 sm:items-end">

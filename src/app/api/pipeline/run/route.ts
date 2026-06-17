@@ -1,13 +1,25 @@
 import { NextResponse } from "next/server";
 
 import { isAuthorizedManualRun, isAuthorizedVercelCron } from "@/lib/auth";
-import { runPipeline } from "@/lib/pipeline";
+import {
+  formatStepError,
+  markRunIncomplete,
+  runPipeline,
+} from "@/lib/pipeline";
+import {
+  createProgress,
+  recordStep,
+  type PipelineProgress,
+} from "@/lib/pipeline-progress";
 import {
   clearStaleRuns,
+  getTodayCompletedRun,
   isRunInProgress,
   readPipelineState,
 } from "@/lib/storage";
-import type { JobListing } from "@/lib/types";
+import type { JobListing, PipelineRunLog } from "@/lib/types";
+
+const PIPELINE_TIMEOUT_MS = 250_000;
 
 const JSON_HEADERS = { "Content-Type": "application/json" } as const;
 
@@ -86,10 +98,102 @@ function buildTestJobs(): JobListing[] {
   ];
 }
 
-async function startPipelineInBackground(
+interface PipelineApiResponse {
+  ok: boolean;
+  cached?: boolean;
+  incomplete?: boolean;
+  error?: string;
+  progress: PipelineProgress;
+  run?: PipelineRunLog;
+}
+
+async function runWithHardTimeout(
   testMode: boolean,
-): Promise<NextResponse> {
+  progress: PipelineProgress,
+): Promise<PipelineApiResponse> {
+  let partialRun: PipelineRunLog | undefined;
+
+  const pipelinePromise = runPipeline({
+    testMode,
+    mockJobs: testMode ? buildTestJobs() : undefined,
+    progress,
+  }).then((run) => {
+    partialRun = run;
+    return run;
+  });
+
+  const timeoutPromise = new Promise<"timeout">((resolve) => {
+    setTimeout(() => resolve("timeout"), PIPELINE_TIMEOUT_MS);
+  });
+
+  const result = await Promise.race([pipelinePromise, timeoutPromise]);
+
+  if (result === "timeout") {
+    if (!partialRun) {
+      const state = await readPipelineState();
+      if (state.lastRun?.status === "running") {
+        partialRun = state.lastRun;
+      }
+    }
+    if (partialRun) {
+      partialRun = await markRunIncomplete(
+        partialRun,
+        `Pipeline timed out after ${PIPELINE_TIMEOUT_MS / 1000} seconds at step: ${progress.lastStep ?? "unknown"}`,
+      );
+    }
+    return {
+      ok: Boolean(partialRun),
+      incomplete: true,
+      error: `Pipeline timed out after ${PIPELINE_TIMEOUT_MS / 1000} seconds`,
+      progress,
+      run: partialRun,
+    };
+  }
+
+  const run = result;
+
+  if (run.status === "failed") {
+    return {
+      ok: false,
+      incomplete: false,
+      error: formatStepError(run.stepError) || run.error,
+      progress,
+      run,
+    };
+  }
+
+  if (run.status === "incomplete") {
+    return {
+      ok: run.matches.length > 0,
+      incomplete: true,
+      error: run.error,
+      progress,
+      run,
+    };
+  }
+
+  return {
+    ok: true,
+    progress,
+    run,
+  };
+}
+
+async function handlePipelineRequest(testMode: boolean): Promise<NextResponse> {
   await clearStaleRuns();
+
+  if (!testMode) {
+    const state = await readPipelineState();
+    const cached = getTodayCompletedRun(state);
+    if (cached) {
+      return jsonResponse({
+        ok: true,
+        cached: true,
+        run: cached,
+        progress: createProgress(),
+      });
+    }
+  }
 
   const state = await readPipelineState();
   if (isRunInProgress(state)) {
@@ -97,29 +201,54 @@ async function startPipelineInBackground(
       {
         ok: false,
         error: "Pipeline is already running. Wait for it to finish.",
+        progress: createProgress(),
       },
       409,
     );
   }
 
-  runPipeline({
-    testMode,
-    mockJobs: testMode ? buildTestJobs() : undefined,
-  }).catch((error) => {
-    console.error(
-      "[pipeline] Background run failed:",
-      error instanceof Error ? error.message : error,
-    );
-  });
+  const progress = createProgress();
+  recordStep(progress, "route_hit", "STEP 1: Route hit");
 
-  return jsonResponse({ ok: true, status: "started" });
+  if (testMode) {
+    recordStep(progress, "test_mode", "STEP 2: Test mode active");
+    recordStep(
+      progress,
+      "mock_jobs",
+      "Mock jobs built in API route",
+      "5 jobs",
+    );
+  }
+
+  try {
+    const payload = await runWithHardTimeout(testMode, progress);
+
+    if (!payload.ok) {
+      return jsonResponse(
+        { ...payload } as Record<string, unknown>,
+        payload.incomplete ? 504 : 500,
+      );
+    }
+
+    return jsonResponse({ ...payload } as Record<string, unknown>);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Pipeline failed";
+    return jsonResponse(
+      {
+        ok: false,
+        incomplete: false,
+        error: message,
+        progress,
+        run: undefined,
+      },
+      500,
+    );
+  }
 }
 
 /** Vercel Cron Jobs invoke this route with GET at 8:00 AM IST (02:30 UTC). */
 export async function GET(request: Request) {
   try {
-    console.log("STEP 1: Route hit");
-
     const debug = debugResponse(request);
     if (debug) return debug;
 
@@ -127,7 +256,7 @@ export async function GET(request: Request) {
       return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
     }
 
-    return await startPipelineInBackground(false);
+    return await handlePipelineRequest(false);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Pipeline failed";
     return jsonResponse({ ok: false, error: message }, 500);
@@ -137,8 +266,6 @@ export async function GET(request: Request) {
 /** Manual trigger from the dashboard (POST). */
 export async function POST(request: Request) {
   try {
-    console.log("STEP 1: Route hit");
-
     const debug = debugResponse(request);
     if (debug) return debug;
 
@@ -154,7 +281,7 @@ export async function POST(request: Request) {
       // empty body is fine for normal runs
     }
 
-    return await startPipelineInBackground(testMode);
+    return await handlePipelineRequest(testMode);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Pipeline failed";
     return jsonResponse({ ok: false, error: message }, 500);
