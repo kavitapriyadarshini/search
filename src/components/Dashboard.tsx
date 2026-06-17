@@ -100,13 +100,23 @@ export default function Dashboard() {
         body: JSON.stringify({ test: testMode }),
         signal: controller.signal,
       });
-      const data = (await res.json()) as {
+      const rawText = await res.text();
+      let data: {
         ok?: boolean;
         incomplete?: boolean;
         error?: string;
         progress?: PipelineProgress;
         run?: PipelineRunLog;
       };
+      try {
+        data = JSON.parse(rawText) as typeof data;
+      } catch {
+        setError(
+          rawText.trim() || `Request failed with status ${res.status}`,
+        );
+        setRunning(false);
+        return;
+      }
 
       if (data.run) {
         setLastRun(data.run);

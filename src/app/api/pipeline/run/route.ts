@@ -16,12 +16,19 @@ import type { JobListing, PipelineRunLog } from "@/lib/types";
 
 const ROUTE_TIMEOUT_MS = 180_000;
 
+const JSON_HEADERS = { "Content-Type": "application/json" } as const;
+
+function jsonResponse(body: Record<string, unknown>, status = 200): NextResponse {
+  return NextResponse.json(body, { status, headers: JSON_HEADERS });
+}
+
 function debugResponse(request: Request) {
   const url = new URL(request.url);
   if (url.searchParams.get("debug") === "true") {
-    return NextResponse.json({
+    return jsonResponse({
+      ok: true,
       status: "route reached",
-      timestamp: new Date(),
+      timestamp: new Date().toISOString(),
     });
   }
   return null;
@@ -198,13 +205,16 @@ async function handlePipelineRequest(
     const payload = await runWithHardTimeout(testMode, progress);
 
     if (!payload.ok) {
-      return NextResponse.json(payload, { status: payload.incomplete ? 504 : 500 });
+      return jsonResponse(
+        { ...payload } as Record<string, unknown>,
+        payload.incomplete ? 504 : 500,
+      );
     }
 
-    return NextResponse.json(payload);
+    return jsonResponse({ ...payload } as Record<string, unknown>);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Pipeline failed";
-    return NextResponse.json(
+    return jsonResponse(
       {
         ok: false,
         incomplete: false,
@@ -212,43 +222,53 @@ async function handlePipelineRequest(
         progress,
         run: undefined,
       },
-      { status: 500 },
+      500,
     );
   }
 }
 
 /** Vercel Cron Jobs invoke this route with GET at 8:00 AM IST (02:30 UTC). */
 export async function GET(request: Request) {
-  console.log("STEP 1: Route hit");
+  try {
+    console.log("STEP 1: Route hit");
 
-  const debug = debugResponse(request);
-  if (debug) return debug;
+    const debug = debugResponse(request);
+    if (debug) return debug;
 
-  if (!isAuthorizedVercelCron(request)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!isAuthorizedVercelCron(request)) {
+      return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+    }
+
+    return await handlePipelineRequest(request, false);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Pipeline failed";
+    return jsonResponse({ ok: false, error: message }, 500);
   }
-
-  return handlePipelineRequest(request, false);
 }
 
 /** Manual trigger from the dashboard (POST). */
 export async function POST(request: Request) {
-  console.log("STEP 1: Route hit");
-
-  const debug = debugResponse(request);
-  if (debug) return debug;
-
-  if (!isAuthorizedManualRun(request)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  let testMode = false;
   try {
-    const body = (await request.json()) as { test?: boolean };
-    testMode = body.test === true;
-  } catch {
-    // empty body is fine for normal runs
-  }
+    console.log("STEP 1: Route hit");
 
-  return handlePipelineRequest(request, testMode);
+    const debug = debugResponse(request);
+    if (debug) return debug;
+
+    if (!isAuthorizedManualRun(request)) {
+      return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+    }
+
+    let testMode = false;
+    try {
+      const body = (await request.json()) as { test?: boolean };
+      testMode = body.test === true;
+    } catch {
+      // empty body is fine for normal runs
+    }
+
+    return await handlePipelineRequest(request, testMode);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Pipeline failed";
+    return jsonResponse({ ok: false, error: message }, 500);
+  }
 }
