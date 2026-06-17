@@ -81,7 +81,7 @@ export function getTodayShortlisted(state: PipelineState): ScoredJob[] {
   return results.sort((a, b) => b.score - a.score);
 }
 
-const STALE_RUN_MS = 5 * 60 * 1000;
+const STALE_RUN_MS = 60 * 60 * 1000;
 
 export function isRunInProgress(state: PipelineState): boolean {
   const last = state.lastRun;
