@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "PM Job Search Pipeline",
   description:
-    "Automated Product Manager job search — Apify scrape, Claude score, Notion track",
+    "Automated Product Manager job search — Apify scrape, Groq score, Notion track",
 };
 
 export default function RootLayout({

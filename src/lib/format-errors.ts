@@ -3,7 +3,7 @@ import type { PipelineStep, PipelineStepError } from "./types";
 const STEP_LABELS: Record<PipelineStep, string> = {
   scrape: "Apify scrape",
   hard_filter: "Hard filters",
-  score: "Claude scoring",
+  score: "Groq scoring",
   notion: "Notion sync",
 };
 

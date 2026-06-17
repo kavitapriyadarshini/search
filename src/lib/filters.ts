@@ -46,3 +46,18 @@ export function isWithinLast24Hours(postedAt?: string): boolean {
   const hoursAgo = (Date.now() - posted.getTime()) / (1000 * 60 * 60);
   return hoursAgo <= 24;
 }
+
+const PM_TITLE_PATTERN = /product manager|\bPM\b/i;
+const DOMAIN_PATTERN = /fintech|payments|\bAI\b|SaaS/i;
+
+/** Keyword pre-filter before LLM scoring — max 5 jobs to reduce API load. */
+export function selectJobsForScoring(
+  jobs: JobListing[],
+  limit = 5,
+): JobListing[] {
+  const matched = jobs.filter((job) => {
+    const text = `${job.title}\n${job.description}`;
+    return PM_TITLE_PATTERN.test(job.title) && DOMAIN_PATTERN.test(text);
+  });
+  return matched.slice(0, limit);
+}

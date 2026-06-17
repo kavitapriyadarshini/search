@@ -54,7 +54,7 @@ export interface PipelineRunLog {
   id: string;
   startedAt: string;
   finishedAt?: string;
-  status: "running" | "success" | "failed";
+  status: "running" | "success" | "failed" | "incomplete";
   testMode?: boolean;
   found: number;
   hardFiltered: number;
@@ -66,6 +66,8 @@ export interface PipelineRunLog {
   failedStep?: PipelineStep;
   stepError?: PipelineStepError;
   scrapeLogs?: ApifyScrapeLog[];
+  scoringProgress?: string;
+  prefilterSelected?: number;
   matches: ScoredJob[];
 }
 

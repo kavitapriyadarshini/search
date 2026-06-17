@@ -49,7 +49,7 @@ const MOCK_TEMPLATES: Omit<JobListing, "id" | "url">[] = [
   },
 ];
 
-/** Five mock listings — skips Apify; exercises hard filters, Claude, and Notion. */
+/** Five mock listings — skips Apify; exercises hard filters, Groq, and Notion. */
 export function getMockJobs(): JobListing[] {
   const ts = Date.now();
   return MOCK_TEMPLATES.map((job, index) => ({

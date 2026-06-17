@@ -3,7 +3,24 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { formatStepError, stepLabel } from "@/lib/format-errors";
-import type { ApifyScrapeLog, PipelineRunLog, ScoredJob } from "@/lib/types";
+import type {
+  ApifyScrapeLog,
+  PipelineRunLog,
+  ScoredJob,
+} from "@/lib/types";
+import type { PipelineProgress } from "@/lib/pipeline-progress";
+
+function isActiveServerRun(run: PipelineRunLog | null): boolean {
+  if (!run || run.status !== "running") return false;
+  const started = new Date(run.startedAt).getTime();
+  if (Number.isNaN(started)) return false;
+  return Date.now() - started < 5 * 60 * 1000;
+}
+
+function formatProgress(progress?: PipelineProgress): string {
+  if (!progress?.steps.length) return "";
+  return progress.steps.map((s) => s.label).join(" → ");
+}
 
 function formatTime(iso?: string): string {
   if (!iso) return "—";
@@ -47,7 +64,7 @@ export default function Dashboard() {
       setJobs(jobsData.jobs);
       setLastRun(logsData.lastRun);
       setRuns(logsData.runs);
-      setRunning(logsData.lastRun?.status === "running");
+      setRunning(isActiveServerRun(logsData.lastRun));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
@@ -75,7 +92,7 @@ export default function Dashboard() {
     setError(null);
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 35000);
+    const timeout = setTimeout(() => controller.abort(), 185_000);
     try {
       const res = await fetch("/api/pipeline/run", {
         method: "POST",
@@ -85,40 +102,56 @@ export default function Dashboard() {
       });
       const data = (await res.json()) as {
         ok?: boolean;
+        incomplete?: boolean;
         error?: string;
+        progress?: PipelineProgress;
         run?: PipelineRunLog;
       };
 
+      if (data.run) {
+        setLastRun(data.run);
+        setRuns((prev) => {
+          const exists = prev.some((r) => r.id === data.run!.id);
+          return exists
+            ? prev.map((r) => (r.id === data.run!.id ? data.run! : r))
+            : [data.run!, ...prev];
+        });
+        if (data.run.matches?.length) {
+          setJobs(data.run.matches);
+        }
+      }
+
       if (!res.ok || !data.ok) {
-        const run = data.run;
         const msg =
           data.error ??
-          (run ? formatStepError(run.stepError) || run.error : undefined) ??
+          (data.run
+            ? formatStepError(data.run.stepError) || data.run.error
+            : undefined) ??
           "Pipeline run failed";
-        setLastRun(run ?? null);
-        if (run) {
-          setRuns((prev) => {
-            const exists = prev.some((r) => r.id === run.id);
-            return exists
-              ? prev.map((r) => (r.id === run.id ? run : r))
-              : [run, ...prev];
-          });
-        }
-        setError(msg);
+        const progressMsg = formatProgress(data.progress);
+        setError(
+          progressMsg
+            ? `${msg} (reached: ${progressMsg})`
+            : msg,
+        );
         setRunning(false);
         return;
       }
 
       setRunMessage(
-        testMode
-          ? `Test run complete — ${data.run?.shortlisted ?? 0} shortlisted${data.run?.warnings?.length ? ` (${data.run.warnings[0]})` : ""}`
-          : `Done — ${data.run?.shortlisted ?? 0} shortlisted, ${data.run?.notionAdded ?? 0} added to Notion`,
+        data.incomplete
+          ? `Incomplete run — ${data.run?.shortlisted ?? 0} shortlisted (${formatProgress(data.progress)})`
+          : testMode
+            ? `Test run complete — ${data.run?.shortlisted ?? 0} shortlisted${data.run?.warnings?.length ? ` (${data.run.warnings[0]})` : ""}`
+            : `Done — ${data.run?.shortlisted ?? 0} shortlisted, ${data.run?.notionAdded ?? 0} added to Notion`,
       );
       await refresh();
       setRunning(false);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
-        setError("Pipeline request timed out after 35 seconds. Please retry.");
+        setError(
+          "Pipeline request timed out after 185 seconds. Check server logs for STEP 1–5.",
+        );
       } else {
         setError(err instanceof Error ? err.message : "Run failed");
       }
@@ -145,7 +178,7 @@ export default function Dashboard() {
               Today&apos;s PM Matches
             </h1>
             <p className="mt-2 max-w-xl text-slate-400">
-              LinkedIn + Naukri → hard filters → Claude scoring → Notion tracker
+              LinkedIn + Naukri → hard filters → Groq scoring → Notion tracker
             </p>
           </div>
           <div className="flex flex-col items-stretch gap-3 sm:items-end">
@@ -223,9 +256,17 @@ export default function Dashboard() {
               <p className="font-mono text-sm text-slate-300">
                 {lastRun.testMode ? "[TEST] " : ""}
                 {lastRun.found} found · {lastRun.hardFiltered} filtered ·{" "}
+                {lastRun.prefilterSelected != null
+                  ? `${lastRun.prefilterSelected} pre-filtered · `
+                  : ""}
                 {lastRun.scored} scored · {lastRun.shortlisted} shortlisted ·{" "}
                 {lastRun.notionAdded} synced to Notion
               </p>
+              {lastRun.status === "running" && lastRun.scoringProgress && (
+                <p className="font-mono text-sm text-amber-300">
+                  {lastRun.scoringProgress}
+                </p>
+              )}
               {lastRun.status === "failed" && (
                 <p className="rounded-md bg-red-950/40 px-3 py-2 font-mono text-xs text-red-200">
                   {stepLabel(lastRun.failedStep)} failed:{" "}

@@ -1,30 +1,47 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Groq from "groq-sdk";
 
 import {
   CANDIDATE_PROFILE,
-  CLAUDE_MODEL,
+  GROQ_MODEL,
   SCORE_THRESHOLD,
 } from "./config";
 import type { JobListing, ScoreCriteria, ScoredJob } from "./types";
 
-function getAnthropicClient(): Anthropic {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error("ANTHROPIC_API_KEY is not set in .env.local");
-  }
-  return new Anthropic({ apiKey });
+const SCORE_DELAY_MS = 3_000;
+const RETRY_DELAY_MS = 20_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-interface ClaudeScoreResponse {
+function getGroqClient(): Groq {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    throw new Error("GROQ_API_KEY is not set in .env.local");
+  }
+  return new Groq({ apiKey });
+}
+
+function isRateLimitError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message.toLowerCase();
+  return (
+    msg.includes("429") ||
+    msg.includes("rate limit") ||
+    msg.includes("too many requests")
+  );
+}
+
+interface ScoreResponse {
   totalScore: number;
   matchReason: string;
   criteria: ScoreCriteria;
 }
 
-function parseScoreResponse(text: string): ClaudeScoreResponse {
+function parseScoreResponse(text: string): ScoreResponse {
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
-    throw new Error("Claude did not return valid JSON for scoring");
+    throw new Error("Groq did not return valid JSON for scoring");
   }
 
   const parsed = JSON.parse(jsonMatch[0]) as {
@@ -34,10 +51,10 @@ function parseScoreResponse(text: string): ClaudeScoreResponse {
   };
 
   const criteria: ScoreCriteria = {
-    domainFit: clampScore(parsed.criteria?.domainFit ?? 0),
-    experienceMatch: clampScore(parsed.criteria?.experienceMatch ?? 0),
-    pmOwnership: clampScore(parsed.criteria?.pmOwnership ?? 0),
-    locationMatch: clampScore(parsed.criteria?.locationMatch ?? 0),
+    domainFit: clampCriteria(parsed.criteria?.domainFit ?? 0),
+    experienceMatch: clampCriteria(parsed.criteria?.experienceMatch ?? 0),
+    pmOwnership: clampCriteria(parsed.criteria?.pmOwnership ?? 0),
+    locationMatch: clampCriteria(parsed.criteria?.locationMatch ?? 0),
   };
 
   const totalFromCriteria =
@@ -46,7 +63,7 @@ function parseScoreResponse(text: string): ClaudeScoreResponse {
     criteria.pmOwnership +
     criteria.locationMatch;
 
-  const totalScore = clampScore(parsed.totalScore ?? totalFromCriteria);
+  const totalScore = clampTotal(parsed.totalScore ?? totalFromCriteria);
 
   return {
     totalScore,
@@ -55,14 +72,16 @@ function parseScoreResponse(text: string): ClaudeScoreResponse {
   };
 }
 
-function clampScore(value: number): number {
+function clampCriteria(value: number): number {
   return Math.max(0, Math.min(25, Math.round(value)));
 }
 
-export async function scoreJob(job: JobListing): Promise<ScoredJob> {
-  const client = getAnthropicClient();
+function clampTotal(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
 
-  const prompt = `You are scoring a job listing for a candidate. Return ONLY valid JSON, no markdown.
+function buildScoringPrompt(job: JobListing): string {
+  return `You are scoring a job listing for a candidate. Return ONLY valid JSON, no markdown.
 
 Candidate profile:
 ${CANDIDATE_PROFILE}
@@ -91,21 +110,24 @@ Respond with this exact JSON shape:
     "locationMatch": <0-25>
   }
 }`;
+}
 
-  const message = await client.messages.create({
-    model: CLAUDE_MODEL,
+export async function scoreJob(job: JobListing): Promise<ScoredJob> {
+  const client = getGroqClient();
+
+  const completion = await client.chat.completions.create({
+    model: GROQ_MODEL,
+    messages: [{ role: "user", content: buildScoringPrompt(job) }],
     max_tokens: 512,
-    messages: [{ role: "user", content: prompt }],
+    temperature: 0.2,
   });
 
-  const textBlock = message.content.find((block) => block.type === "text");
-  if (!textBlock || textBlock.type !== "text") {
-    throw new Error("Empty response from Claude");
+  const text = completion.choices[0]?.message?.content;
+  if (!text) {
+    throw new Error("Empty response from Groq");
   }
 
-  const { totalScore, matchReason, criteria } = parseScoreResponse(
-    textBlock.text,
-  );
+  const { totalScore, matchReason, criteria } = parseScoreResponse(text);
 
   return {
     ...job,
@@ -115,11 +137,54 @@ Respond with this exact JSON shape:
   };
 }
 
-export async function scoreJobs(jobs: JobListing[]): Promise<ScoredJob[]> {
-  const scored: ScoredJob[] = [];
-  for (const job of jobs) {
-    scored.push(await scoreJob(job));
+async function scoreJobWithRetry(job: JobListing): Promise<ScoredJob> {
+  try {
+    return await scoreJob(job);
+  } catch (error) {
+    if (!isRateLimitError(error)) throw error;
+    console.warn(
+      `[scorer] 429 rate limit for "${job.title}", retrying in ${RETRY_DELAY_MS / 1000}s`,
+    );
+    await sleep(RETRY_DELAY_MS);
+    return await scoreJob(job);
   }
+}
+
+export interface ScoreJobsHooks {
+  onStart?: () => void;
+  onProgress?: (current: number, total: number) => void | Promise<void>;
+  onDone?: () => void;
+}
+
+export async function scoreJobs(
+  jobs: JobListing[],
+  hooks?: ScoreJobsHooks,
+): Promise<ScoredJob[]> {
+  hooks?.onStart?.();
+
+  const scored: ScoredJob[] = [];
+  const total = jobs.length;
+
+  for (let i = 0; i < jobs.length; i++) {
+    const job = jobs[i];
+    try {
+      const result = await scoreJobWithRetry(job);
+      scored.push(result);
+    } catch (error) {
+      console.error(
+        `[scorer] Failed to score "${job.title}":`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    await hooks?.onProgress?.(i + 1, total);
+
+    if (i < jobs.length - 1) {
+      await sleep(SCORE_DELAY_MS);
+    }
+  }
+
+  hooks?.onDone?.();
   return scored;
 }
 

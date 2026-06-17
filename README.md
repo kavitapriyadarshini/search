@@ -1,12 +1,12 @@
 # PM Job Search Pipeline
 
-Automated daily job search for **Product Manager** roles in **Bengaluru** or **remote**, with Apify scraping, Claude scoring, and Notion tracking.
+Automated daily job search for **Product Manager** roles in **Bengaluru** or **remote**, with Apify scraping, Groq scoring, and Notion tracking.
 
 ## Stack
 
 - **Next.js** dashboard (`Run Now`, today's matches, run logs)
 - **Apify** — LinkedIn + Naukri actors
-- **Claude** (`claude-haiku-4-5-20251001`) — 0–100 score on 4 × 25 criteria
+- **Groq** (`llama-3.1-8b-instant`) — 0–100 score on 4 × 25 criteria
 - **Notion** — shortlisted jobs database
 - **cron** — daily 8:00 AM IST
 
@@ -23,9 +23,9 @@ Fill in:
 | Variable | Description |
 |----------|-------------|
 | `APIFY_API_KEY` | Apify API token |
-| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `GROQ_API_KEY` | Groq API key for job scoring |
 | `NOTION_API_KEY` | Notion integration secret |
-| `NOTION_DATABASE_ID` | Target database ID |
+| `NOTION_DATABASE_ID` | 32-char database ID only (no URL, hyphens auto-stripped) |
 | `CRON_SECRET` | Random secret for Vercel Cron (required in production) |
 
 ### 2. Notion database
@@ -37,10 +37,11 @@ Create a database with these **exact** property names:
 | Role Title | Title |
 | Company | Text |
 | Score | Number |
-| Match reason | Text |
+| Match Reason | Text |
 | JD Link | URL |
+| Apply Link | URL |
 | Date Found | Date |
-| Status | Select (add option **To Apply**) |
+| Status | Status (option **To Apply**) |
 
 Connect your Notion integration to the database (⋯ → Connections).
 
@@ -64,7 +65,7 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) and click **Run Now**.
 
-**Test mode:** Check "Test mode" on the dashboard (or `npm run pipeline -- --test`) to skip Apify and run 5 mock jobs through Claude scoring and Notion sync.
+**Test mode:** Check "Test mode" on the dashboard (or `npm run pipeline -- --test`) to skip Apify and run 5 mock jobs through Groq scoring and Notion sync.
 
 Or run the pipeline from the CLI:
 
@@ -95,7 +96,7 @@ Vercel automatically sends `Authorization: Bearer <CRON_SECRET>` on cron invocat
 1. Scrape LinkedIn (Bengaluru + remote, last 24h) and Naukri (Bangalore + remote, last 24h)
 2. Deduplicate by job URL
 3. **Hard filters** (auto-reject JD containing): `quota`, `pipeline`, `sales target`, `unpaid`, `intern`, `night shift`, `rotational shift`, or Associate PM + 5+ years
-4. **Claude score** (0–100, threshold **60**)
+4. **Groq score** (0–100, threshold **60**)
 5. Push passing jobs to Notion (skip duplicates by JD Link)
 
 ## Project layout
@@ -104,7 +105,7 @@ Vercel automatically sends `Authorization: Bearer <CRON_SECRET>` on cron invocat
 src/lib/
   apify.ts      # LinkedIn + Naukri scrapers
   filters.ts    # Hard filters
-  scorer.ts     # Claude scoring
+  scorer.ts     # Groq scoring
   notion.ts     # Notion sync
   pipeline.ts   # Orchestration
 data/
