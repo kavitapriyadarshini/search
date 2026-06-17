@@ -1,36 +1,35 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
-import path from "path";
-
 import type { PipelineRunLog, PipelineState, ScoredJob } from "./types";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const STATE_FILE = path.join(DATA_DIR, "pipeline-state.json");
+const MAX_RUNS = 30;
 
-const defaultState: PipelineState = {
-  lastRun: null,
-  runs: [],
-};
+declare global {
+  var __jobsearchPipelineState: PipelineState | undefined;
+}
 
-async function ensureDataDir(): Promise<void> {
-  await mkdir(DATA_DIR, { recursive: true });
+function defaultState(): PipelineState {
+  return {
+    lastRun: null,
+    runs: [],
+  };
+}
+
+function getStore(): PipelineState {
+  if (!globalThis.__jobsearchPipelineState) {
+    globalThis.__jobsearchPipelineState = defaultState();
+  }
+  return globalThis.__jobsearchPipelineState;
 }
 
 export async function readPipelineState(): Promise<PipelineState> {
-  try {
-    const raw = await readFile(STATE_FILE, "utf-8");
-    return JSON.parse(raw) as PipelineState;
-  } catch {
-    return { ...defaultState };
-  }
+  return structuredClone(getStore());
 }
 
 export async function writePipelineState(state: PipelineState): Promise<void> {
-  await ensureDataDir();
-  await writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+  globalThis.__jobsearchPipelineState = structuredClone(state);
 }
 
 export async function startRun(id: string): Promise<PipelineRunLog> {
-  const state = await readPipelineState();
+  const state = getStore();
   const run: PipelineRunLog = {
     id,
     startedAt: new Date().toISOString(),
@@ -44,24 +43,21 @@ export async function startRun(id: string): Promise<PipelineRunLog> {
   };
 
   state.lastRun = run;
-  state.runs = [run, ...state.runs].slice(0, 30);
-  await writePipelineState(state);
+  state.runs = [run, ...state.runs].slice(0, MAX_RUNS);
   return run;
 }
 
 export async function persistRun(run: PipelineRunLog): Promise<void> {
-  const state = await readPipelineState();
+  const state = getStore();
   state.lastRun = run;
   state.runs = state.runs.map((r) => (r.id === run.id ? run : r));
-  await writePipelineState(state);
 }
 
 export async function finishRun(run: PipelineRunLog): Promise<void> {
-  const state = await readPipelineState();
+  const state = getStore();
   run.finishedAt = new Date().toISOString();
   state.lastRun = run;
   state.runs = state.runs.map((r) => (r.id === run.id ? run : r));
-  await writePipelineState(state);
 }
 
 export function getTodayShortlisted(state: PipelineState): ScoredJob[] {
@@ -99,7 +95,7 @@ export function isRunInProgress(state: PipelineState): boolean {
 
 /** Mark abandoned runs as failed so new runs are not blocked forever. */
 export async function clearStaleRuns(): Promise<void> {
-  const state = await readPipelineState();
+  const state = getStore();
   const last = state.lastRun;
   if (!last || last.status !== "running") return;
 
@@ -111,6 +107,5 @@ export async function clearStaleRuns(): Promise<void> {
   last.error = "Previous run timed out or was interrupted — cleared automatically";
   state.lastRun = last;
   state.runs = state.runs.map((r) => (r.id === last.id ? last : r));
-  await writePipelineState(state);
   console.warn(`[storage] Cleared stale run ${last.id}`);
 }
