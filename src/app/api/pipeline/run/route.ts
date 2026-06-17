@@ -14,8 +14,6 @@ import {
 import { readPipelineState } from "@/lib/storage";
 import type { JobListing, PipelineRunLog } from "@/lib/types";
 
-export const maxDuration = 600;
-
 const ROUTE_TIMEOUT_MS = 180_000;
 
 function debugResponse(request: Request) {
