@@ -69,6 +69,7 @@ export interface PipelineRunLog {
   scoringProgress?: string;
   prefilterSelected?: number;
   matches: ScoredJob[];
+  scrapedJobs?: JobListing[];
 }
 
 export interface PipelineState {

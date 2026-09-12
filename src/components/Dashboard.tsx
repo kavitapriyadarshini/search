@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { formatStepError, stepLabel } from "@/lib/format-errors";
+import NetworkMatches from "@/components/NetworkMatches";
 import type {
   ApifyScrapeLog,
+  JobListing,
   PipelineRunLog,
   ScoredJob,
 } from "@/lib/types";
@@ -55,6 +57,7 @@ function formatTime(iso?: string): string {
 
 export default function Dashboard() {
   const [jobs, setJobs] = useState<ScoredJob[]>([]);
+  const [scrapedJobs, setScrapedJobs] = useState<JobListing[]>([]);
   const [lastRun, setLastRun] = useState<PipelineRunLog | null>(null);
   const [runs, setRuns] = useState<PipelineRunLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -77,13 +80,17 @@ export default function Dashboard() {
         throw new Error("Failed to load dashboard data");
       }
 
-      const jobsData = (await jobsRes.json()) as { jobs: ScoredJob[] };
+      const jobsData = (await jobsRes.json()) as {
+        jobs: ScoredJob[];
+        scraped: JobListing[];
+      };
       const logsData = (await logsRes.json()) as {
         lastRun: PipelineRunLog | null;
         runs: PipelineRunLog[];
       };
 
       setJobs(jobsData.jobs);
+      setScrapedJobs(jobsData.scraped ?? []);
       setLastRun(logsData.lastRun);
       setRuns(logsData.runs);
       setRunning(isActiveServerRun(logsData.lastRun));
@@ -430,6 +437,8 @@ export default function Dashboard() {
             </ul>
           )}
         </section>
+
+        <NetworkMatches jobListings={scrapedJobs} />
       </div>
     </div>
   );

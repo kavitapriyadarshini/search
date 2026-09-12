@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 
-import { getTodayShortlisted, readPipelineState } from "@/lib/storage";
+import { getTodayScrapedJobs, getTodayShortlisted, readPipelineState } from "@/lib/storage";
 
 export async function GET() {
   const state = await readPipelineState();
   const jobs = getTodayShortlisted(state);
-  return NextResponse.json({ jobs });
+  const scraped = getTodayScrapedJobs(state);
+  return NextResponse.json({ jobs, scraped });
 }

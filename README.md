@@ -6,7 +6,7 @@ Automated daily job search for **Product Manager** roles in **Bengaluru** or **r
 
 - **Next.js** dashboard (`Run Now`, today's matches, run logs)
 - **Apify** — LinkedIn + Naukri actors
-- **Groq** (`llama-3.1-8b-instant`) — 0–100 score on 4 × 25 criteria
+- **Groq** (`llama-3.3-70b-versatile`) — 0–100 score on 4 × 25 criteria
 - **Notion** — shortlisted jobs database
 - **cron** — daily 8:00 AM IST
 

@@ -1,4 +1,4 @@
-import type { PipelineRunLog, PipelineState, ScoredJob } from "./types";
+import type { JobListing, PipelineRunLog, PipelineState, ScoredJob } from "./types";
 
 const MAX_RUNS = 30;
 
@@ -79,6 +79,28 @@ export function getTodayShortlisted(state: PipelineState): ScoredJob[] {
   }
 
   return results.sort((a, b) => b.score - a.score);
+}
+
+export function getTodayScrapedJobs(state: PipelineState): JobListing[] {
+  const today = new Date().toISOString().slice(0, 10);
+  const seen = new Set<string>();
+  const results: JobListing[] = [];
+
+  for (const run of state.runs) {
+    if (run.status !== "success" && run.status !== "incomplete") continue;
+    const runDay = (run.finishedAt ?? run.startedAt).slice(0, 10);
+    if (runDay !== today) continue;
+
+    const listings = run.scrapedJobs ?? [];
+    for (const job of listings) {
+      const key = job.url.toLowerCase().replace(/\/$/, "");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      results.push(job);
+    }
+  }
+
+  return results;
 }
 
 /** Most recent non-test run that finished successfully today. */

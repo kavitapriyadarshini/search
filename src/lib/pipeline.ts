@@ -81,6 +81,7 @@ export async function runPipeline(
         `${allJobs.length} jobs`,
       );
       run.scrapeLogs = [];
+      run.scrapedJobs = allJobs;
     } else {
       const scrapeResult = await scrapeAllSources();
       run.scrapeLogs = scrapeResult.logs;
@@ -114,6 +115,7 @@ export async function runPipeline(
     }
 
     run.found = allJobs.length;
+    run.scrapedJobs = allJobs;
 
     step = "hard_filter";
     const afterHardFilter: JobListing[] = [];

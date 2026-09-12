@@ -4,7 +4,7 @@ export const CANDIDATE_PROFILE = `5 years PM experience, ex-Razorpay (payments, 
 
 export const SCORE_THRESHOLD = 60;
 
-export const GROQ_MODEL = "llama-3.1-8b-instant";
+export const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 /**
  * Apify actor IDs (use ~ in API paths; / in store URLs).
